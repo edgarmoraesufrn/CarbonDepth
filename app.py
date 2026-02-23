@@ -16,6 +16,7 @@ import io
 import tempfile
 from pathlib import Path
 
+st.set_page_config(layout="wide")]
 # ---------------------------
 # Paths (cross-platform safe)
 # ---------------------------
