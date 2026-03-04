@@ -16,7 +16,6 @@ import io
 import tempfile
 from pathlib import Path
 
-st.set_page_config(layout="wide")
 # ---------------------------
 # Paths (cross-platform safe)
 # ---------------------------
@@ -24,6 +23,8 @@ st.set_page_config(layout="wide")
 # Use BASE_DIR + a small resolver to locate assets/docs whether they live in
 # the project root or in subfolders (assets/, docs/).
 BASE_DIR = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
+
+st.set_page_config(layout="wide")
 
 def resolve_resource(*candidates: str) -> Path | None:
     """Return the first existing path among candidates (relative to BASE_DIR)."""
@@ -1117,25 +1118,90 @@ if uploaded_file is not None:
         x_left, x_right = x_indices[0], x_indices[-1]
         width_cement_px = x_right - x_left + 1
         height = mask_cement.shape[0]
-        center_y = height // 2
-        offset = int(0.05 * height)
-        y_lines = [center_y - offset, center_y, center_y + offset]  # top, center, bottom
 
-        # Fill small holes in purple mask
-        kernel = np.ones((5,5), np.uint8)
+        # --- Sampling strategy (central band to avoid edge/lateral carbonation) ---
+        # Use multiple horizontal lines only within the central region (default: 30%–70% of height).
+        # This improves robustness while avoiding the specimen ends (where lateral carbonation can bias results).
+        n_lines = 9
+        y0 = int(0.30 * height)
+        y1 = int(0.70 * height)
+        if y1 <= y0 + 1:
+            # Fallback for very small images
+            center_y = height // 2
+            offset = max(1, int(0.05 * height))
+            y_lines = np.array([center_y - offset, center_y, center_y + offset], dtype=int)
+        else:
+            y_lines = np.linspace(y0, y1, n_lines).astype(int)
+        y_lines = np.unique(np.clip(y_lines, 0, height - 1))
+
+        # --- Fill small holes in alkaline mask (purple) ---
+        kernel = np.ones((5, 5), np.uint8)
         mask_purple_filled = cv2.morphologyEx(mask_purple, cv2.MORPH_CLOSE, kernel)
 
-        depths = []
+        # --- (1) Anti-pocket filter (isolated islands) ---
+        # Keep only the dominant connected alkaline region on cement.
+        mask_purple_on_cement = cv2.bitwise_and(mask_purple_filled, mask_cement)
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+            (mask_purple_on_cement > 0).astype(np.uint8), connectivity=8
+        )
+        if num_labels > 1:
+            largest_label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+            mask_purple_main = (labels == largest_label).astype(np.uint8) * 255
+        else:
+            mask_purple_main = np.zeros_like(mask_purple_on_cement, dtype=np.uint8)
+
+        # --- Depths per sampled line ---
+        depths_raw = []
         for y in y_lines:
-            row_purple = mask_purple_filled[y, :]
-            L_purple = np.sum(row_purple > 0)
+            # (2) Use the cement width of THIS line (protects against cavities/chips)
+            row_cement = (mask_cement[y, :] > 0)
+            L_cement = int(np.sum(row_cement))
+            if L_cement == 0:
+                continue
 
-            depth = (width_cement_px - L_purple) * mm_per_pixel / 2
-            depths.append(depth)
+            row_purple = (mask_purple_main[y, :] > 0) & row_cement
+            L_purple = int(np.sum(row_purple))
 
-        # --- Média e desvio padrão das 3 medidas ---
-        avg_depth = statistics.mean(depths)
-        std_depth = statistics.stdev(depths) if len(depths) > 1 else 0.0
+            # Same depth definition as the original algorithm; only "width" is made line-consistent.
+            depth = (L_cement - L_purple) * mm_per_pixel / 2.0
+            depths_raw.append(float(depth))
+
+        if len(depths_raw) == 0:
+            depths = []
+            avg_depth, std_depth = 0.0, 0.0
+        else:
+            depths_np = np.asarray(depths_raw, dtype=float)
+
+            # (3) Robust outlier handling (MAD, threshold 3.5)
+            med = float(np.median(depths_np))
+            mad = float(np.median(np.abs(depths_np - med)))
+
+            depths_used = depths_np
+            n_removed = 0
+
+            if mad > 1e-12:
+                z = np.abs(depths_np - med) / (1.4826 * mad)
+                keep = (z <= 3.5)
+                n_removed = int(np.sum(~keep))
+                depths_used = depths_np[keep]
+
+            # Safety rule: allow up to 3 removals; otherwise, keep raw and ask for review
+            if n_removed > 0:
+                st.warning(f"⚠️ Outlier handling removed {n_removed} line(s) from depth averaging (MAD z > 3.5).")
+            if n_removed > 3:
+                st.error(
+                    "❌ Too many depth outliers were detected (>3). "
+                    "The image/specimen likely has strong artifacts (lateral carbonation, cavities, poor staining). "
+                    "The program will keep the unfiltered depths; please review the specimen/image."
+                )
+                depths_used = depths_np
+
+            # Ensure std is defined safely
+            avg_depth = float(np.mean(depths_used))
+            std_depth = float(np.std(depths_used, ddof=1)) if depths_used.size > 1 else 0.0
+
+            # Report the list used for averaging (filtered when applicable)
+            depths = [float(x) for x in depths_used.tolist()]
 
     # --- 📦 Pack variables for Image Analysis PDF report ---
     def _to_u8_mask(m):
