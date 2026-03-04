@@ -754,9 +754,15 @@ if uploaded_file is not None:
     kernel_size_gray = 5
 
     # Single, meaningful control: alkaline/purple cleanup
-    kernel_size_purple = st.slider("Cleanup kernel (alkaline/purple)", 1, 15, 5, step=2)
+    kernel_size_purple = st.slider("Cleanup strength (alkaline/purple)", 1, 11, 4, step=1)
+
+    # Make morphology LESS sensitive: keep hole-filling (CLOSE) stable, and let the slider mostly control denoising (OPEN)
+    close_kernel_size_purple = 9  # fixed, stable
+    open_kernel_size_purple = int(max(3, min(23, 2 * kernel_size_purple + 1)))  # 3..23, gentle scaling
+    close_kernel_purple = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_kernel_size_purple, close_kernel_size_purple))
+    open_kernel_purple  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (open_kernel_size_purple,  open_kernel_size_purple))
     st.markdown(
-        "<small>💡 Tip: Refines the alkaline (purple) region. Increase to remove noise; decrease to preserve fine details.</small>",
+        "<small>💡 Tip: Controls denoising of the alkaline (purple) region. Higher values remove small speckles; lower values preserve fine details. The hole-filling step is kept stable to avoid abrupt jumps.</small>",
         unsafe_allow_html=True,
     )
 
@@ -797,10 +803,10 @@ if uploaded_file is not None:
     mask_gray = cv2.bitwise_and(mask_gray, cv2.bitwise_not(mask_white))
     mask_purple = cv2.bitwise_and(mask_purple, cv2.bitwise_not(mask_white))
 
-    # --- 🔧 Morphology for purple ---
-    merge_kernel = np.ones((kernel_size_purple * 3, kernel_size_purple * 3), dtype=np.uint8)
-    mask_purple = cv2.morphologyEx(mask_purple, cv2.MORPH_CLOSE, merge_kernel)
-    mask_purple = cv2.morphologyEx(mask_purple, cv2.MORPH_OPEN, np.ones((kernel_size_purple, kernel_size_purple), np.uint8))
+    # --- 🔧 Morphology for purple (stabilized) ---
+    # CLOSE uses a fixed kernel (reduces sensitivity); OPEN uses the user-controlled kernel.
+    mask_purple = cv2.morphologyEx(mask_purple, cv2.MORPH_CLOSE, close_kernel_purple)
+    mask_purple = cv2.morphologyEx(mask_purple, cv2.MORPH_OPEN,  open_kernel_purple)
 
     # --- 🛠️ Shape-Based Mask (bright regions) ---
     gray = cv2.cvtColor(enhanced_bgr, cv2.COLOR_BGR2GRAY)
@@ -866,12 +872,9 @@ if uploaded_file is not None:
 
             mask_purple_hard = cv2.bitwise_or(mask_hsv, mask_lab)
 
-            # Cleanup (reuse user kernel slider)
-            merge_kernel2 = np.ones((kernel_size_purple * 3, kernel_size_purple * 3), dtype=np.uint8)
-            mask_purple_hard = cv2.morphologyEx(mask_purple_hard, cv2.MORPH_CLOSE, merge_kernel2)
-            mask_purple_hard = cv2.morphologyEx(
-                mask_purple_hard, cv2.MORPH_OPEN, np.ones((kernel_size_purple, kernel_size_purple), np.uint8)
-            )
+            # Cleanup (reuse stabilized kernels)
+            mask_purple_hard = cv2.morphologyEx(mask_purple_hard, cv2.MORPH_CLOSE, close_kernel_purple)
+            mask_purple_hard = cv2.morphologyEx(mask_purple_hard, cv2.MORPH_OPEN,  open_kernel_purple)
 
             # Restrict to specimen area
             mask_purple_hard = cv2.bitwise_and(mask_purple_hard, mask_cement)
@@ -1185,6 +1188,19 @@ if uploaded_file is not None:
                 n_removed = int(np.sum(~keep))
                 depths_used = depths_np[keep]
 
+            # Extra robustness: if a single line is still wildly discrepant (e.g., ~2× the median),
+            # it can slip through MAD when the sample is small or dispersion is high.
+            if depths_used.size >= 5:
+                med2 = float(np.median(depths_used))
+                maxv = float(np.max(depths_used))
+                minv = float(np.min(depths_used))
+                ratio_hi = (maxv / med2) if med2 > 1e-12 else np.inf
+                ratio_lo = (med2 / max(minv, 1e-12))
+                # If either tail is too extreme, remove the single worst point (counts toward removals).
+                if (ratio_hi > 1.9 or ratio_lo > 1.9):
+                    idx_worst = int(np.argmax(np.abs(depths_used - med2)))
+                    depths_used = np.delete(depths_used, idx_worst)
+                    n_removed += 1
             # Safety rule: allow up to 3 removals; otherwise, keep raw and ask for review
             if n_removed > 0:
                 st.warning(f"⚠️ Outlier handling removed {n_removed} line(s) from depth averaging (MAD z > 3.5).")
@@ -1199,6 +1215,16 @@ if uploaded_file is not None:
             # Ensure std is defined safely
             avg_depth = float(np.mean(depths_used))
             std_depth = float(np.std(depths_used, ddof=1)) if depths_used.size > 1 else 0.0
+
+            # Dispersion diagnostics (does not change results)
+            if depths_used.size >= 3:
+                med_used = float(np.median(depths_used))
+                max_used = float(np.max(depths_used))
+                min_used = float(np.min(depths_used))
+                if med_used > 1e-12 and (max_used / med_used) > 1.9:
+                    st.warning("⚠️ Depth dispersion is high (max is >1.9× the median). Consider reviewing segmentation/lighting.")
+                if min_used > 1e-12 and (med_used / min_used) > 1.9:
+                    st.warning("⚠️ Depth dispersion is high (median is >1.9× the minimum). Consider reviewing segmentation/lighting.")
 
             # Report the list used for averaging (filtered when applicable)
             depths = [float(x) for x in depths_used.tolist()]
