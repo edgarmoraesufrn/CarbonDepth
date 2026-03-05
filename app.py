@@ -1588,37 +1588,65 @@ if uploaded_file is not None:
 
     st.caption("Fill the table first. Then click **Generate plot**. (Decimal separator = '.')")
 
+    # Current table (kept stable across reruns)
     df_kinetics_current = pd.DataFrame(st.session_state.kinetics_data_raw)
 
-    st.data_editor(
-        df_kinetics_current,
-        key="kinetics_editor",
-        on_change=_persist_kinetics_editor,
-        column_config={
-            "time_days": st.column_config.TextColumn("Time (days)", help="Use '.' as decimal separator."),
-            "depth_mm": st.column_config.TextColumn("Depth (mm)", help="Use '.' as decimal separator."),
-        },
-        num_rows="dynamic",
-        use_container_width=True,
-    )
+    # Use a form so typing in the table is not interrupted by automatic reruns (e.g., plots/metrics updating).
+    # The table is only persisted when the user clicks one of the form buttons.
+    with st.form("kinetics_form", clear_on_submit=False):
+        df_edit = st.data_editor(
+            df_kinetics_current,
+            key="kinetics_editor",
+            column_config={
+                "time_days": st.column_config.TextColumn("Time (days)", help="Use '.' as decimal separator."),
+                "depth_mm": st.column_config.TextColumn("Depth (mm)", help="Use '.' as decimal separator."),
+            },
+            num_rows="dynamic",
+            use_container_width=True,
+        )
 
-    model_choice = st.selectbox(
-        "📌 Kinetics Model",
-        model_options,
-        index=model_options.index(st.session_state.kinetics_model_choice or default_model),
-        key="model_choice_select",
-        help="For natural exposure, a forced origin model is often adequate. For accelerated exposure, allow an intercept.",
-    )
-    st.session_state.kinetics_model_choice = model_choice
+        model_choice = st.selectbox(
+            "📌 Kinetics Model",
+            model_options,
+            index=model_options.index(st.session_state.kinetics_model_choice or default_model),
+            key="model_choice_select",
+            help="For natural exposure, a forced origin model is often adequate. For accelerated exposure, allow an intercept.",
+        )
 
-    cA, cB = st.columns([1, 1])
-    if cA.button("💾 Save table", key="btn_save_kin_table", use_container_width=True):
-        _persist_kinetics_editor()
-        st.success("Kinetics table saved.")
+        cA, cB = st.columns([1, 1])
+        save_clicked = cA.form_submit_button("💾 Save table", use_container_width=True)
+        fit_clicked = cB.form_submit_button("📈 Generate plot (fit model)", use_container_width=True)
 
-    if cB.button("📈 Generate plot (fit model)", key="btn_fit_kin", use_container_width=True):
-        _persist_kinetics_editor()
-        st.session_state.kinetics_fit_requested = True
+    # Persist only on submit (prevents 'vanishing' values while typing)
+    if save_clicked or fit_clicked:
+        try:
+            df_now = df_edit.fillna("").astype(str)
+            st.session_state.kinetics_data_raw = df_now.to_dict("records")
+        except Exception:
+            pass
+
+        st.session_state.kinetics_model_choice = model_choice
+
+        if save_clicked:
+            try:
+                df_now = pd.DataFrame(st.session_state.kinetics_data_raw).fillna("").astype(str)
+                st.session_state.kinetics_table_txt = df_now.to_csv(sep="\t", index=False, lineterminator="\n")
+            except Exception:
+                st.session_state.kinetics_table_txt = ""
+            st.success("Kinetics table saved in the current session. You can download it below.")
+
+        if fit_clicked:
+            st.session_state.kinetics_fit_requested = True
+
+    # Download saved table (TXT)
+    if st.session_state.get("kinetics_table_txt"):
+        st.download_button(
+            "⬇️ Download kinetics table (TXT)",
+            data=st.session_state["kinetics_table_txt"],
+            file_name=f"CarbonationKineticsTable_{sample_name}.txt",
+            mime="text/plain",
+            use_container_width=True,
+        )
 
     # Build a numeric view for calculations (comma accepted, '.' preferred)
     df_str = pd.DataFrame(st.session_state.kinetics_data_raw).fillna("").astype(str)
