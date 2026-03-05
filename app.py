@@ -16,6 +16,61 @@ import io
 import tempfile
 from pathlib import Path
 
+
+# -------------------------
+# Locale-safe numeric parsing
+# -------------------------
+def _parse_float_loose(x):
+    """Parse a float accepting either '.' or ',' as decimal separator.
+    Returns None if parsing fails."""
+    if x is None:
+        return None
+    if isinstance(x, (int, float, np.floating)):
+        try:
+            return float(x)
+        except Exception:
+            return None
+    s = str(x).strip()
+    if s == "":
+        return None
+    # Remove spaces and convert comma-decimal to dot-decimal
+    s = s.replace(" ", "").replace(",", ".")
+    # Allow things like '1.234.56'? (rare) -> reject
+    try:
+        return float(s)
+    except Exception:
+        return None
+
+def float_input(label, *, key, value=0.0, min_value=None, help=None):
+    """Text-based numeric input that works with ',' or '.' but normalizes to '.'.
+    Returns a float (or the last valid value)."""
+    str_key = f"{key}__str"
+    val_key = f"{key}__float"
+
+    if str_key not in st.session_state:
+        st.session_state[str_key] = f"{float(value):.2f}"
+    if val_key not in st.session_state:
+        st.session_state[val_key] = float(value)
+
+    raw = st.text_input(label, key=str_key, help=help)
+
+    parsed = _parse_float_loose(raw)
+    if parsed is None:
+        st.caption("⚠️ Enter a number using '.' as decimal (comma is accepted and will be converted).") 
+        return float(st.session_state[val_key])
+
+    if (min_value is not None) and (parsed < float(min_value)):
+        st.caption(f"⚠️ Value must be ≥ {float(min_value):.2f}.")
+        return float(st.session_state[val_key])
+
+    # Normalize comma to dot in the textbox on next rerun (keeps the app 'worldwide')
+    norm = str(raw).strip().replace(" ", "").replace(",", ".")
+    if norm != raw:
+        st.session_state[str_key] = norm
+
+    st.session_state[val_key] = float(parsed)
+    return float(parsed)
+
 # ---------------------------
 # Paths (cross-platform safe)
 # ---------------------------
@@ -740,12 +795,12 @@ if uploaded_file is not None:
         specimen_shape = st.selectbox("Specimen Shape", ["Cylindrical", "Rectangular"])
     with col_dims:
         if specimen_shape == "Cylindrical":
-            d_mm = st.number_input("Diameter (mm)", min_value=1.0, value=50.00, format="%.2f")
-            h_mm = st.number_input("Height (mm)", min_value=1.0, value=100.00, format="%.2f")
+            d_mm = float_input("Diameter (mm)", key="diameter_mm", value=50.00, min_value=1.0)
+            h_mm = float_input("Height (mm)", key="height_mm", value=100.00, min_value=1.0)
         else:
-            base_mm = st.number_input("Base (mm)", min_value=1.0, value=50.00, format="%.2f")
-            h_mm = st.number_input("Height (mm)", min_value=1.0, value=100.00, format="%.2f")
-            depth_mm = st.number_input("Depth (mm)", min_value=1.0, value=50.00, format="%.2f")
+            base_mm = float_input("Base (mm)", key="base_mm", value=50.00, min_value=1.0)
+            h_mm = float_input("Height (mm)", key="height_mm_rect", value=100.00, min_value=1.0)
+            depth_mm = float_input("Depth (mm)", key="depth_mm", value=50.00, min_value=1.0)
 
     st.subheader("🎛️ Segmentation Settings")
     # NOTE: The former "gray regions" control became a derived quantity (total − purple),
@@ -1465,26 +1520,36 @@ if uploaded_file is not None:
     )
     st.session_state.assay_type = assay_type
 
-    # --- Initial kinetics table
-    if "kinetics_data" not in st.session_state:
-        st.session_state.kinetics_data = [
-            {"time_days": 30.0, "depth_mm": 0.91},
-            {"time_days": 60.0, "depth_mm": 2.85},
-            {"time_days": 90.0, "depth_mm": 4.11},
+    # --- Initial kinetics table (locale-safe: accepts '.' or ',' decimals) ---
+    if "kinetics_data_raw" not in st.session_state:
+        st.session_state.kinetics_data_raw = [
+            {"time_days": "30.00", "depth_mm": "0.91"},
+            {"time_days": "60.00", "depth_mm": "2.85"},
+            {"time_days": "90.00", "depth_mm": "4.11"},
         ]
 
-    df_kinetics = pd.DataFrame(st.session_state.kinetics_data)
+    df_kinetics = pd.DataFrame(st.session_state.kinetics_data_raw)
+
     df_edited = st.data_editor(
         df_kinetics,
         key="kinetics_editor",
         column_config={
-            "time_days": st.column_config.NumberColumn("Time (days)", min_value=0.1, format="%.2f"),
-            "depth_mm": st.column_config.NumberColumn("Depth (mm)", min_value=0.0, format="%.2f"),
+            "time_days": st.column_config.TextColumn("Time (days)", help="Use '.' as decimal (comma is accepted)."),
+            "depth_mm": st.column_config.TextColumn("Depth (mm)", help="Use '.' as decimal (comma is accepted)."),
         },
         num_rows="dynamic",
         use_container_width=True,
     )
-    st.session_state.kinetics_data = df_edited.to_dict("records")
+
+    # Persist what the user typed (strings) to avoid 'vanishing' values during reruns.
+    df_edited_str = df_edited.fillna("").astype(str)
+    st.session_state.kinetics_data_raw = df_edited_str.to_dict("records")
+
+    # Build a numeric view for calculations
+    df_numeric = pd.DataFrame({
+        "time_days": [_parse_float_loose(v) for v in df_edited_str.get("time_days", [])],
+        "depth_mm": [_parse_float_loose(v) for v in df_edited_str.get("depth_mm", [])],
+    })
 
     # --- Model definitions (t in years)
     def model_fick_forced(t_years, k):
@@ -1519,8 +1584,8 @@ if uploaded_file is not None:
     )
 
     # --- Extract and validate data
-    times_days = df_edited.get("time_days", pd.Series(dtype=float)).to_numpy(dtype=float)
-    depths_mm = df_edited.get("depth_mm", pd.Series(dtype=float)).to_numpy(dtype=float)
+    times_days = df_numeric.get("time_days", pd.Series(dtype=float)).to_numpy(dtype=float)
+    depths_mm = df_numeric.get("depth_mm", pd.Series(dtype=float)).to_numpy(dtype=float)
 
     fig = None
     params = {}
