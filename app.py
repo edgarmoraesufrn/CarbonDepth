@@ -1506,7 +1506,7 @@ if uploaded_file is not None:
         )
 # --- 📈 Carbonation Kinetics Module ---
     st.subheader("📈 Carbonation Kinetics Analysis")
-    st.markdown("Enter depth vs. time data to fit carbonation kinetics models (e.g., $X = k \sqrt{t}$).")
+    st.markdown("Enter depth vs. time data to fit carbonation kinetics models (e.g., $X = k \\sqrt{t}$).")
 
     # --- Assay type (controls default model suggestion)
     if "assay_type" not in st.session_state:
@@ -1521,71 +1521,85 @@ if uploaded_file is not None:
     )
     st.session_state.assay_type = assay_type
 
-    # --- Initial kinetics table (stable editing via form; locale-safe: accepts '.' or ',' decimals) ---
+    # --- Kinetics table state (kept stable across reruns)
     if "kinetics_data_raw" not in st.session_state:
         st.session_state.kinetics_data_raw = [
             {"time_days": "30.00", "depth_mm": "0.91"},
             {"time_days": "60.00", "depth_mm": "2.85"},
             {"time_days": "90.00", "depth_mm": "4.11"},
         ]
+
     if "kinetics_model_choice" not in st.session_state:
         st.session_state.kinetics_model_choice = None
 
+    if "kinetics_fit_requested" not in st.session_state:
+        st.session_state.kinetics_fit_requested = False
+
+    model_options = [
+        "Fick (X = k√t) – forced b=0",
+        "Fick (X = k√t + b) – with intercept",
+        "Saturating model: z(t) = c + a√t + b·√t/(√t+1)",
+    ]
+
+    default_model = (
+        "Fick (X = k√t) – forced b=0"
+        if assay_type == "Natural carbonation (start at t=0)"
+        else "Fick (X = k√t + b) – with intercept"
+    )
+
+    def _persist_kinetics_editor():
+        """Persist the in-progress table so the user's typing never vanishes on reruns."""
+        try:
+            df_now = st.session_state.get("kinetics_editor")
+            if df_now is None:
+                return
+            df_now = df_now.fillna("").astype(str)
+            st.session_state.kinetics_data_raw = df_now.to_dict("records")
+        except Exception:
+            pass
+
+    st.caption("Fill the table first. Then click **Generate plot**. (Decimal separator = '.')")
+
     df_kinetics_current = pd.DataFrame(st.session_state.kinetics_data_raw)
 
-    # Use a form so typing inside the table never gets overwritten by other reruns.
-    with st.form("kinetics_form", clear_on_submit=False):
-        df_edited = st.data_editor(
-            df_kinetics_current,
-            key="kinetics_editor",
-            column_config={
-                "time_days": st.column_config.TextColumn("Time (days)", help="Use '.' as decimal (comma is accepted)."),
-                "depth_mm": st.column_config.TextColumn("Depth (mm)", help="Use '.' as decimal (comma is accepted)."),
-            },
-            num_rows="dynamic",
-            use_container_width=True,
-        )
+    st.data_editor(
+        df_kinetics_current,
+        key="kinetics_editor",
+        on_change=_persist_kinetics_editor,
+        column_config={
+            "time_days": st.column_config.TextColumn("Time (days)", help="Use '.' as decimal separator."),
+            "depth_mm": st.column_config.TextColumn("Depth (mm)", help="Use '.' as decimal separator."),
+        },
+        num_rows="dynamic",
+        use_container_width=True,
+    )
 
-        # --- Model choice (inside the form to avoid reruns while editing)
-        model_options = [
-            "Fick (X = k√t) – forced b=0",
-            "Fick (X = k√t + b) – with intercept",
-            "Saturating model: z(t) = c + a√t + b·√t/(√t+1)",
-        ]
-        default_model = (
-            "Fick (X = k√t) – forced b=0"
-            if assay_type == "Natural carbonation (start at t=0)"
-            else "Fick (X = k√t + b) – with intercept"
-        )
+    model_choice = st.selectbox(
+        "📌 Kinetics Model",
+        model_options,
+        index=model_options.index(st.session_state.kinetics_model_choice or default_model),
+        key="model_choice_select",
+        help="For natural exposure, a forced origin model is often adequate. For accelerated exposure, allow an intercept.",
+    )
+    st.session_state.kinetics_model_choice = model_choice
 
-        model_choice_form = st.selectbox(
-            "📌 Kinetics Model",
-            model_options,
-            index=model_options.index(
-                st.session_state.kinetics_model_choice or default_model
-            ),
-            key="model_choice_select_form",
-            help="For natural exposure, a forced origin model is often adequate. For accelerated exposure, allow an intercept.",
-        )
+    cA, cB = st.columns([1, 1])
+    if cA.button("💾 Save table", key="btn_save_kin_table", use_container_width=True):
+        _persist_kinetics_editor()
+        st.success("Kinetics table saved.")
 
-        submitted_kin = st.form_submit_button("✅ Update kinetics & fit model")
+    if cB.button("📈 Generate plot (fit model)", key="btn_fit_kin", use_container_width=True):
+        _persist_kinetics_editor()
+        st.session_state.kinetics_fit_requested = True
 
-    # Persist only when the user clicks the button (prevents the 'vanishing' behavior)
-    if submitted_kin:
-        df_edited_str = df_edited.fillna("").astype(str)
-        st.session_state.kinetics_data_raw = df_edited_str.to_dict("records")
-        st.session_state.kinetics_model_choice = model_choice_form
-        model_choice = model_choice_form
-    else:
-        # Use last committed values
-        df_edited_str = pd.DataFrame(st.session_state.kinetics_data_raw).fillna("").astype(str)
-        model_choice = st.session_state.kinetics_model_choice or default_model
-
-    # Build a numeric view for calculations
-    df_numeric = pd.DataFrame({
-        "time_days": [_parse_float_loose(v) for v in df_edited_str.get("time_days", [])],
-        "depth_mm": [_parse_float_loose(v) for v in df_edited_str.get("depth_mm", [])],
-    })
+    # Build a numeric view for calculations (comma accepted, '.' preferred)
+    df_str = pd.DataFrame(st.session_state.kinetics_data_raw).fillna("").astype(str)
+    df_numeric = pd.DataFrame(
+        {
+            "time_days": [_parse_float_loose(v) for v in df_str.get("time_days", [])],
+            "depth_mm": [_parse_float_loose(v) for v in df_str.get("depth_mm", [])],
+        }
+    )
 
     # --- Model definitions (t in years)
     def model_fick_forced(t_years, k):
@@ -1595,11 +1609,10 @@ if uploaded_file is not None:
         return k * np.sqrt(t_years) + b
 
     def model_saturating_intercept(t_years, c, a, b):
-        # z(t) = c + a*sqrt(t) + b*sqrt(t)/(sqrt(t)+1)
         s = np.sqrt(t_years)
         return c + a * s + b * s / (s + 1.0)
 
-# --- Extract and validate data
+    # --- Extract and validate data
     times_days = df_numeric.get("time_days", pd.Series(dtype=float)).to_numpy(dtype=float)
     depths_mm = df_numeric.get("depth_mm", pd.Series(dtype=float)).to_numpy(dtype=float)
 
@@ -1610,242 +1623,178 @@ if uploaded_file is not None:
     rmse = None
     pred_10 = None
 
-    if len(times_days) >= 3:
-        valid = [(t, d) for t, d in zip(times_days, depths_mm) if np.isfinite(t) and np.isfinite(d) and t > 0 and d >= 0]
+    if st.session_state.kinetics_fit_requested:
+        valid = [
+            (t, d)
+            for t, d in zip(times_days, depths_mm)
+            if np.isfinite(t) and np.isfinite(d) and t > 0 and d >= 0
+        ]
+
         if len(valid) < 3:
             st.warning("Need at least 3 valid points (time > 0, depth ≥ 0).")
         else:
             t_days, y = map(np.array, zip(*valid))
             t_years = t_days / 365.25
 
-            # Guard against zero/negative years
-            if np.any(t_years <= 0):
-                st.warning("Time values must be positive.")
-            else:
-                try:
-                    # --- Fit according to selected model
-                    if model_choice.startswith("Fick (X = k√t) – forced"):
-                        s = np.sqrt(t_years)
-                        k_hat = float(np.sum(y * s) / np.sum(s ** 2))
-                        y_hat = model_fick_forced(t_years, k_hat)
+            try:
+                # --- Fit according to selected model
+                if model_choice.startswith("Fick (X = k√t) – forced"):
+                    s = np.sqrt(t_years)
+                    k_hat = float(np.sum(y * s) / np.sum(s ** 2))
+                    y_hat = model_fick_forced(t_years, k_hat)
+                    params = {"k": k_hat, "b": 0.0, "model": "fick_forced"}
+                    eq_label = rf"$X = {k_hat:.2f}\,\sqrt{{t}}$"
 
-                        params = {"k": k_hat, "b": 0.0, "model": "fick_forced"}
-                        eq_label = rf"$X = {k_hat:.2f}\,\sqrt{{t}}$"
+                elif model_choice.startswith("Fick (X = k√t + b)"):
+                    s = np.sqrt(t_years)
+                    slope, intercept, r_val, p_val, std_err = linregress(s, y)
+                    k_hat = float(slope)
+                    b_hat = float(intercept)
+                    y_hat = model_fick_intercept(t_years, k_hat, b_hat)
+                    params = {"k": k_hat, "b": b_hat, "model": "fick_intercept"}
+                    eq_label = rf"$X = {k_hat:.2f}\,\sqrt{{t}} {b_hat:+.2f}$"
 
-                    elif model_choice.startswith("Fick (X = k√t + b)"):
-                        # Linear regression on sqrt(t)
-                        s = np.sqrt(t_years)
-                        slope, intercept, r_val, p_val, std_err = linregress(s, y)
-                        k_hat = float(slope)
-                        b_hat = float(intercept)
-                        y_hat = model_fick_intercept(t_years, k_hat, b_hat)
+                else:
+                    s = np.sqrt(t_years)
+                    k0 = float(np.sum(y * s) / np.sum(s ** 2))
+                    c0 = float(y[np.argmin(t_years)])
+                    p0 = [c0, k0, 0.0]
+                    popt, pcov = curve_fit(
+                        model_saturating_intercept, t_years, y, p0=p0, maxfev=20000
+                    )
+                    c_hat, a_hat, b_hat = map(float, popt)
+                    y_hat = model_saturating_intercept(t_years, c_hat, a_hat, b_hat)
+                    params = {"c": c_hat, "a": a_hat, "b": b_hat, "model": "saturating_intercept"}
+                    eq_label = rf"$z(t)= {c_hat:.2f} + {a_hat:.2f}\sqrt{{t}} {b_hat:+.2f}\frac{{\sqrt{{t}}}}{{\sqrt{{t}}+1}}$"
 
-                        params = {"k": k_hat, "b": b_hat, "model": "fick_intercept"}
-                        eq_label = rf"$X = {k_hat:.2f}\,\sqrt{{t}} {b_hat:+.2f}$"
+                # --- Metrics
+                resid = y - y_hat
+                mse = float(np.mean(resid ** 2))
+                rmse = float(np.sqrt(mse))
+                ss_res = float(np.sum(resid ** 2))
+                ss_tot = float(np.sum((y - np.mean(y)) ** 2))
+                r2 = float(1 - ss_res / ss_tot) if ss_tot > 0 else 0.0
+                r2 = max(min(r2, 1.0), 0.0)
 
-                    else:
-                        # Saturating with intercept c (NOT forced through 0)
-                        # initial guesses: c ~ y at earliest time, a ~ k from forced, b ~ 0
-                        s = np.sqrt(t_years)
-                        k0 = float(np.sum(y * s) / np.sum(s ** 2))
-                        c0 = float(y[np.argmin(t_years)])
-                        p0 = [c0, k0, 0.0]
-                        popt, pcov = curve_fit(
-                            model_saturating_intercept,
-                            t_years,
-                            y,
-                            p0=p0,
-                            maxfev=20000,
-                        )
-                        c_hat, a_hat, b_hat = map(float, popt)
-                        y_hat = model_saturating_intercept(t_years, c_hat, a_hat, b_hat)
-
-                        params = {"c": c_hat, "a": a_hat, "b": b_hat, "model": "saturating_intercept"}
-                        eq_label = rf"$z(t)= {c_hat:.2f} + {a_hat:.2f}\sqrt{{t}} {b_hat:+.2f}\frac{{\sqrt{{t}}}}{{\sqrt{{t}}+1}}$"
-
-                    # --- Metrics
-                    resid = y - y_hat
-                    mse = float(np.mean(resid ** 2))
-                    rmse = float(np.sqrt(mse))
-                    ss_res = float(np.sum(resid ** 2))
-                    ss_tot = float(np.sum((y - np.mean(y)) ** 2))
-                    r2 = float(1 - ss_res / ss_tot) if ss_tot > 0 else 0.0
-                    r2 = max(min(r2, 1.0), 0.0)
-
-                    # --- Prediction at 10 years
-                    t10 = 10.0
-                    if params.get("model") == "fick_forced":
-                        pred_10 = float(model_fick_forced(np.array([t10]), params["k"])[0])
-                    elif params.get("model") == "fick_intercept":
-                        pred_10 = float(model_fick_intercept(np.array([t10]), params["k"], params["b"])[0])
-                    else:
-                        pred_10 = float(model_saturating_intercept(np.array([t10]), params["c"], params["a"], params["b"])[0])
-
-                    # --- Plot
-                    t_smooth = np.linspace(0.001, max(1.0, float(np.max(t_years)) * 1.05), 250)
-                    if params.get("model") == "fick_forced":
-                        y_smooth = model_fick_forced(t_smooth, params["k"])
-                    elif params.get("model") == "fick_intercept":
-                        y_smooth = model_fick_intercept(t_smooth, params["k"], params["b"])
-                    else:
-                        y_smooth = model_saturating_intercept(t_smooth, params["c"], params["a"], params["b"])
-
-                    y_max = max(float(np.max(y_smooth)), float(np.max(y))) * 1.10
-
-                    fig, ax = plt.subplots(figsize=(7.2, 4.6), dpi=220)
-
-                    ax.scatter(
-
-                        t_years, y, s=46, marker='o',
-
-                        facecolors='white', edgecolors='black', linewidths=0.9,
-
-                        label='Measured data', zorder=3
-
+                # --- Prediction at 10 years
+                t10 = 10.0
+                if params.get("model") == "fick_forced":
+                    pred_10 = float(model_fick_forced(np.array([t10]), params["k"])[0])
+                elif params.get("model") == "fick_intercept":
+                    pred_10 = float(model_fick_intercept(np.array([t10]), params["k"], params["b"])[0])
+                else:
+                    pred_10 = float(
+                        model_saturating_intercept(np.array([t10]), params["c"], params["a"], params["b"])[0]
                     )
 
-                    ax.plot(t_smooth, y_smooth, linewidth=2.2, label=eq_label, zorder=2)
+                # --- Plot
+                t_smooth = np.linspace(0.001, max(1.0, float(np.max(t_years)) * 1.05), 250)
+                if params.get("model") == "fick_forced":
+                    y_smooth = model_fick_forced(t_smooth, params["k"])
+                elif params.get("model") == "fick_intercept":
+                    y_smooth = model_fick_intercept(t_smooth, params["k"], params["b"])
+                else:
+                    y_smooth = model_saturating_intercept(t_smooth, params["c"], params["a"], params["b"])
 
-                    ax.set_xlabel('Exposure time (years)')
+                y_max = max(float(np.max(y_smooth)), float(np.max(y))) * 1.10
 
-                    ax.set_ylabel('Carbonation depth (mm)')
+                fig, ax = plt.subplots(figsize=(7.2, 4.6), dpi=220)
+                ax.scatter(
+                    t_years,
+                    y,
+                    s=46,
+                    marker="o",
+                    facecolors="white",
+                    edgecolors="black",
+                    linewidths=0.9,
+                    label="Measured data",
+                    zorder=3,
+                )
+                ax.plot(t_smooth, y_smooth, linewidth=2.2, label=eq_label, zorder=2)
+                ax.set_xlabel("Exposure time (years)")
+                ax.set_ylabel("Carbonation depth (mm)")
+                ax.set_title("Carbonation kinetics")
+                ax.set_xlim(0, max(1.0, float(np.max(t_years)) * 1.05))
+                ax.set_ylim(0, y_max)
+                ax.grid(True, which="major", linestyle="--", linewidth=0.6, alpha=0.35)
+                ax.tick_params(direction="out", length=4, width=1)
+                for spine in ["top", "right"]:
+                    ax.spines[spine].set_visible(False)
+                ax.legend(loc="upper left", frameon=True, framealpha=0.95, edgecolor="0.85")
+                fig.tight_layout()
+                st.pyplot(fig, use_container_width=True)
 
-                    ax.set_title('Carbonation kinetics')
+                # --- KPIs
+                c1, c2, c3, c4 = st.columns(4)
+                if params.get("model") in ["fick_forced", "fick_intercept"]:
+                    c1.metric("k", f"{params['k']:.2f}", "mm/√year")
+                    c2.metric("b", f"{params.get('b', 0.0):.2f}", "mm")
+                else:
+                    c1.metric("a", f"{params['a']:.2f}", "mm/√year")
+                    c2.metric("c", f"{params['c']:.2f}", "mm")
 
-                    ax.set_xlim(0, max(1.0, float(np.max(t_years)) * 1.05))
+                c3.metric("R²", f"{r2:.8f}")
+                c4.metric("RMSE", f"{rmse:.5f}", "mm")
+                st.caption(f"MSE: {mse:.4f} mm² • Prediction at 10 years: {pred_10:.2f} mm")
 
-                    ax.set_ylim(0, y_max)
+                # --- ⬇️ Export fitted data (.txt)
+                with st.expander("⬇️ Export fit data (TXT)", expanded=False):
+                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    model_id = params.get("model", "unknown")
 
-                    ax.grid(True, which='major', linestyle='--', linewidth=0.6, alpha=0.35)
+                    lines = []
+                    lines.append("Carbon Depth – Carbonation Kinetics Analysis (TXT export)")
+                    lines.append(f"Sample\t\t: {sample_name}")
+                    lines.append(f"Date\t\t: {timestamp}")
+                    lines.append(f"Assay type\t: {assay_type}")
+                    lines.append(f"Model\t\t: {model_choice} [{model_id}]")
+                    lines.append("")
 
-                    ax.tick_params(direction='out', length=4, width=1)
-
-                    for spine in ['top', 'right']:
-
-                        ax.spines[spine].set_visible(False)
-
-                    ax.legend(loc='upper left', frameon=True, framealpha=0.95, edgecolor='0.85')
-
-                    fig.tight_layout()
-
-                    st.pyplot(fig, use_container_width=True)
-
-                    # --- KPIs
-                    c1, c2, c3, c4 = st.columns(4)
-
-                    if params.get("model") in ["fick_forced", "fick_intercept"]:
-                        c1.metric("k", f"{params['k']:.2f}", "mm/√year")
-                        c2.metric("b", f"{params.get('b', 0.0):.2f}", "mm")
+                    lines.append("[Parameters]")
+                    if model_id in ("fick_forced", "fick_intercept"):
+                        lines.append(f"k\t= {float(params.get('k', float('nan'))):.12g}\t# mm/sqrt(year)")
+                        lines.append(f"b\t= {float(params.get('b', 0.0)):.12g}\t# mm")
                     else:
-                        c1.metric("a", f"{params['a']:.2f}", "mm/√year")
-                        c2.metric("c", f"{params['c']:.2f}", "mm")
+                        lines.append(f"c\t= {float(params.get('c', float('nan'))):.12g}\t# mm")
+                        lines.append(f"a\t= {float(params.get('a', float('nan'))):.12g}\t# mm/sqrt(year)")
+                        lines.append(f"b\t= {float(params.get('b', float('nan'))):.12g}\t# (saturating term)")
+                    lines.append("")
 
-                    c3.metric("R²", f"{r2:.8f}")
-                    c4.metric("RMSE", f"{rmse:.5f}", "mm")
+                    lines.append("[Fit quality]")
+                    lines.append(f"R2\t= {float(r2):.12g}")
+                    lines.append(f"RMSE\t= {float(rmse):.12g}\t# mm")
+                    lines.append(f"MSE\t= {float(mse):.12g}\t# mm^2")
+                    if pred_10 is not None:
+                        lines.append(f"Prediction_10y\t= {float(pred_10):.12g}\t# mm at t=10 years")
+                    lines.append("")
 
-                    if r2 is not None and r2 > 0.9999:
-                        st.caption(f"Precision note: 1 − R² = {(1 - r2):.2e}")
+                    lines.append("[Measured_and_fitted_points]")
+                    lines.append("time_days\ttime_years\tdepth_mm_measured\tdepth_mm_fitted")
+                    for td, ty, ym, yf in zip(t_days, t_years, y, y_hat):
+                        lines.append(f"{float(td):.12g}\t{float(ty):.12g}\t{float(ym):.12g}\t{float(yf):.12g}")
+                    lines.append("")
 
-                    st.caption(f"MSE: {mse:.4f} mm² • Prediction at 10 years: {pred_10:.2f} mm")
+                    lines.append("[Fitted_curve_smooth]")
+                    lines.append("time_years\tdepth_mm")
+                    for ty, yy in zip(t_smooth, y_smooth):
+                        lines.append(f"{float(ty):.12g}\t{float(yy):.12g}")
 
-                    # --- Model comparison (reference)
-                    with st.expander("🔍 Model Comparison (reference)"):
-                        s = np.sqrt(t_years)
-                        # forced
-                        k_forced = float(np.sum(y * s) / np.sum(s ** 2))
-                        y_forced = model_fick_forced(t_years, k_forced)
-                        mse_forced = float(np.mean((y - y_forced) ** 2))
-                        rmse_forced = float(np.sqrt(mse_forced))
-                        ss_res = float(np.sum((y - y_forced) ** 2))
-                        ss_tot = float(np.sum((y - np.mean(y)) ** 2))
-                        r2_forced = float(1 - ss_res / ss_tot) if ss_tot > 0 else 0.0
-                        r2_forced = max(min(r2_forced, 1.0), 0.0)
+                    txt_data = "\n".join(lines) + "\n"
 
-                        # intercept
-                        slope, intercept, r_val, p_val, std_err = linregress(s, y)
-                        y_int = model_fick_intercept(t_years, float(slope), float(intercept))
-                        mse_int = float(np.mean((y - y_int) ** 2))
-                        rmse_int = float(np.sqrt(mse_int))
-                        ss_res = float(np.sum((y - y_int) ** 2))
-                        r2_int = float(1 - ss_res / ss_tot) if ss_tot > 0 else 0.0
-                        r2_int = max(min(r2_int, 1.0), 0.0)
+                    st.download_button(
+                        "⬇️ Download TXT (fit data)",
+                        data=txt_data.encode("utf-8"),
+                        file_name=f"{sample_name}_kinetics_fit.txt",
+                        mime="text/plain",
+                    )
+                    st.caption("The file is tab-delimited (TSV). Open in Excel or import into any plotting software.")
 
-                        st.markdown(
-                            f"""
-| Model | Parameters | R² | RMSE (mm) | MSE (mm²) |
-|---|---:|---:|---:|---:|
-| Fick forced | k={k_forced:.2f}, b=0 | {r2_forced:.5f} | {rmse_forced:.5f} | {mse_forced:.4f} |
-| Fick + intercept | k={float(slope):.2f}, b={float(intercept):+.2f} | {r2_int:.3f} | {rmse_int:.3f} | {mse_int:.4f} |
-"""
-                        )
-
-
-                    # --- ⬇️ Export fitted data (.txt) ---
-                    with st.expander("⬇️ Export fit data (TXT)", expanded=False):
-                        try:
-                            # Prepare a tidy TXT export for use in external software (Origin, Excel, MATLAB, etc.)
-                            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            model_id = params.get("model", "unknown")
-
-                            # Header + metadata
-                            lines = []
-                            lines.append("Carbon Depth – Carbonation Kinetics Analysis (TXT export)")
-                            lines.append(f"Sample\t\t: {sample_name}")
-                            lines.append(f"Date\t\t: {timestamp}")
-                            lines.append(f"Assay type\t: {assay_type}")
-                            lines.append(f"Model\t\t: {model_choice} [{model_id}]")
-                            lines.append("")
-
-                            # Parameters
-                            lines.append("[Parameters]")
-                            if model_id in ("fick_forced", "fick_intercept"):
-                                lines.append(f"k\t= {float(params.get('k', float('nan'))):.10g}\t# mm/sqrt(year)")
-                                lines.append(f"b\t= {float(params.get('b', 0.0)):.10g}\t# mm")
-                            else:
-                                lines.append(f"c\t= {float(params.get('c', float('nan'))):.10g}\t# mm")
-                                lines.append(f"a\t= {float(params.get('a', float('nan'))):.10g}\t# mm/sqrt(year)")
-                                lines.append(f"b\t= {float(params.get('b', float('nan'))):.10g}\t# mm (saturating term)")
-                            lines.append("")
-
-                            # Metrics
-                            lines.append("[Fit quality]")
-                            lines.append(f"R2\t= {float(r2):.12g}")
-                            lines.append(f"RMSE\t= {float(rmse):.12g}\t# mm")
-                            lines.append(f"MSE\t= {float(mse):.12g}\t# mm^2")
-                            if pred_10 is not None:
-                                lines.append(f"Prediction_10y\t= {float(pred_10):.12g}\t# mm at t=10 years")
-                            lines.append("")
-
-                            # Raw points + fitted at the same points
-                            lines.append("[Measured_and_fitted_points]")
-                            lines.append("time_days\ttime_years\tdepth_mm_measured\tdepth_mm_fitted")
-                            for td, ty, ym, yf in zip(t_days, t_years, y, y_hat):
-                                lines.append(f"{float(td):.12g}\t{float(ty):.12g}\t{float(ym):.12g}\t{float(yf):.12g}")
-                            lines.append("")
-
-                            # Smooth curve used in the plot
-                            lines.append("[Fitted_curve_smooth]")
-                            lines.append("time_years\tdepth_mm")
-                            for ty, yy in zip(t_smooth, y_smooth):
-                                lines.append(f"{float(ty):.12g}\t{float(yy):.12g}")
-
-                            txt_data = "\n".join(lines) + "\n"
-
-                            st.download_button(
-                                "⬇️ Download TXT (fit data)",
-                                data=txt_data.encode("utf-8"),
-                                file_name=f"{sample_name}_kinetics_fit.txt",
-                                mime="text/plain",
-                            )
-                            st.caption("The file is tab-delimited (TSV). You can open it in Excel or import it into any plotting software.")
-                        except Exception as _e:
-                            st.warning(f"Unable to generate TXT export: {_e}")
-                except Exception as e:
-                    st.error(f"Model fitting failed: {e}")
+            except Exception as e:
+                st.error(f"Model fitting failed: {e}")
     else:
-        st.info("Enter at least 3 data points to enable kinetic analysis.")
+        st.info("Fill the table, then click **Generate plot (fit model)**.")
 
-    # --- 📄 Kinetics PDF Report ---
+# --- 📄 Kinetics PDF Report ---
     if fig is not None and r2 is not None and mse is not None and rmse is not None:
         if st.button("📥 Generate Kinetics Analysis Report", key="btn_kin_report"):
             def generate_kinetics_pdf(sample_name, assay_type, model_choice, df_kinetics, fig, params, r2, mse, rmse, pred_10):
