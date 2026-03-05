@@ -67,6 +67,7 @@ def float_input(label, *, key, value=0.0, min_value=None, help=None):
     norm = str(raw).strip().replace(" ", "").replace(",", ".")
     if norm != raw:
         st.session_state[str_key] = norm
+        st.rerun()
 
     st.session_state[val_key] = float(parsed)
     return float(parsed)
@@ -1520,30 +1521,65 @@ if uploaded_file is not None:
     )
     st.session_state.assay_type = assay_type
 
-    # --- Initial kinetics table (locale-safe: accepts '.' or ',' decimals) ---
+    # --- Initial kinetics table (stable editing via form; locale-safe: accepts '.' or ',' decimals) ---
     if "kinetics_data_raw" not in st.session_state:
         st.session_state.kinetics_data_raw = [
             {"time_days": "30.00", "depth_mm": "0.91"},
             {"time_days": "60.00", "depth_mm": "2.85"},
             {"time_days": "90.00", "depth_mm": "4.11"},
         ]
+    if "kinetics_model_choice" not in st.session_state:
+        st.session_state.kinetics_model_choice = None
 
-    df_kinetics = pd.DataFrame(st.session_state.kinetics_data_raw)
+    df_kinetics_current = pd.DataFrame(st.session_state.kinetics_data_raw)
 
-    df_edited = st.data_editor(
-        df_kinetics,
-        key="kinetics_editor",
-        column_config={
-            "time_days": st.column_config.TextColumn("Time (days)", help="Use '.' as decimal (comma is accepted)."),
-            "depth_mm": st.column_config.TextColumn("Depth (mm)", help="Use '.' as decimal (comma is accepted)."),
-        },
-        num_rows="dynamic",
-        use_container_width=True,
-    )
+    # Use a form so typing inside the table never gets overwritten by other reruns.
+    with st.form("kinetics_form", clear_on_submit=False):
+        df_edited = st.data_editor(
+            df_kinetics_current,
+            key="kinetics_editor",
+            column_config={
+                "time_days": st.column_config.TextColumn("Time (days)", help="Use '.' as decimal (comma is accepted)."),
+                "depth_mm": st.column_config.TextColumn("Depth (mm)", help="Use '.' as decimal (comma is accepted)."),
+            },
+            num_rows="dynamic",
+            use_container_width=True,
+        )
 
-    # Persist what the user typed (strings) to avoid 'vanishing' values during reruns.
-    df_edited_str = df_edited.fillna("").astype(str)
-    st.session_state.kinetics_data_raw = df_edited_str.to_dict("records")
+        # --- Model choice (inside the form to avoid reruns while editing)
+        model_options = [
+            "Fick (X = k√t) – forced b=0",
+            "Fick (X = k√t + b) – with intercept",
+            "Saturating model: z(t) = c + a√t + b·√t/(√t+1)",
+        ]
+        default_model = (
+            "Fick (X = k√t) – forced b=0"
+            if assay_type == "Natural carbonation (start at t=0)"
+            else "Fick (X = k√t + b) – with intercept"
+        )
+
+        model_choice_form = st.selectbox(
+            "📌 Kinetics Model",
+            model_options,
+            index=model_options.index(
+                st.session_state.kinetics_model_choice or default_model
+            ),
+            key="model_choice_select_form",
+            help="For natural exposure, a forced origin model is often adequate. For accelerated exposure, allow an intercept.",
+        )
+
+        submitted_kin = st.form_submit_button("✅ Update kinetics & fit model")
+
+    # Persist only when the user clicks the button (prevents the 'vanishing' behavior)
+    if submitted_kin:
+        df_edited_str = df_edited.fillna("").astype(str)
+        st.session_state.kinetics_data_raw = df_edited_str.to_dict("records")
+        st.session_state.kinetics_model_choice = model_choice_form
+        model_choice = model_choice_form
+    else:
+        # Use last committed values
+        df_edited_str = pd.DataFrame(st.session_state.kinetics_data_raw).fillna("").astype(str)
+        model_choice = st.session_state.kinetics_model_choice or default_model
 
     # Build a numeric view for calculations
     df_numeric = pd.DataFrame({
@@ -1563,27 +1599,7 @@ if uploaded_file is not None:
         s = np.sqrt(t_years)
         return c + a * s + b * s / (s + 1.0)
 
-    # --- Model choice
-    model_options = [
-        "Fick (X = k√t) – forced b=0",
-        "Fick (X = k√t + b) – with intercept",
-        "Saturating model: z(t) = c + a√t + b·√t/(√t+1)",
-    ]
-    default_model = (
-        "Fick (X = k√t) – forced b=0"
-        if assay_type == "Natural carbonation (start at t=0)"
-        else "Fick (X = k√t + b) – with intercept"
-    )
-
-    model_choice = st.selectbox(
-        "📌 Kinetics Model",
-        model_options,
-        index=model_options.index(default_model),
-        key="model_choice_select",
-        help="For natural exposure, a forced origin model is often adequate. For accelerated exposure, allow an intercept.",
-    )
-
-    # --- Extract and validate data
+# --- Extract and validate data
     times_days = df_numeric.get("time_days", pd.Series(dtype=float)).to_numpy(dtype=float)
     depths_mm = df_numeric.get("depth_mm", pd.Series(dtype=float)).to_numpy(dtype=float)
 
@@ -1763,6 +1779,67 @@ if uploaded_file is not None:
 """
                         )
 
+
+                    # --- ⬇️ Export fitted data (.txt) ---
+                    with st.expander("⬇️ Export fit data (TXT)", expanded=False):
+                        try:
+                            # Prepare a tidy TXT export for use in external software (Origin, Excel, MATLAB, etc.)
+                            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            model_id = params.get("model", "unknown")
+
+                            # Header + metadata
+                            lines = []
+                            lines.append("Carbon Depth – Carbonation Kinetics Analysis (TXT export)")
+                            lines.append(f"Sample\t\t: {sample_name}")
+                            lines.append(f"Date\t\t: {timestamp}")
+                            lines.append(f"Assay type\t: {assay_type}")
+                            lines.append(f"Model\t\t: {model_choice} [{model_id}]")
+                            lines.append("")
+
+                            # Parameters
+                            lines.append("[Parameters]")
+                            if model_id in ("fick_forced", "fick_intercept"):
+                                lines.append(f"k\t= {float(params.get('k', float('nan'))):.10g}\t# mm/sqrt(year)")
+                                lines.append(f"b\t= {float(params.get('b', 0.0)):.10g}\t# mm")
+                            else:
+                                lines.append(f"c\t= {float(params.get('c', float('nan'))):.10g}\t# mm")
+                                lines.append(f"a\t= {float(params.get('a', float('nan'))):.10g}\t# mm/sqrt(year)")
+                                lines.append(f"b\t= {float(params.get('b', float('nan'))):.10g}\t# mm (saturating term)")
+                            lines.append("")
+
+                            # Metrics
+                            lines.append("[Fit quality]")
+                            lines.append(f"R2\t= {float(r2):.12g}")
+                            lines.append(f"RMSE\t= {float(rmse):.12g}\t# mm")
+                            lines.append(f"MSE\t= {float(mse):.12g}\t# mm^2")
+                            if pred_10 is not None:
+                                lines.append(f"Prediction_10y\t= {float(pred_10):.12g}\t# mm at t=10 years")
+                            lines.append("")
+
+                            # Raw points + fitted at the same points
+                            lines.append("[Measured_and_fitted_points]")
+                            lines.append("time_days\ttime_years\tdepth_mm_measured\tdepth_mm_fitted")
+                            for td, ty, ym, yf in zip(t_days, t_years, y, y_hat):
+                                lines.append(f"{float(td):.12g}\t{float(ty):.12g}\t{float(ym):.12g}\t{float(yf):.12g}")
+                            lines.append("")
+
+                            # Smooth curve used in the plot
+                            lines.append("[Fitted_curve_smooth]")
+                            lines.append("time_years\tdepth_mm")
+                            for ty, yy in zip(t_smooth, y_smooth):
+                                lines.append(f"{float(ty):.12g}\t{float(yy):.12g}")
+
+                            txt_data = "\n".join(lines) + "\n"
+
+                            st.download_button(
+                                "⬇️ Download TXT (fit data)",
+                                data=txt_data.encode("utf-8"),
+                                file_name=f"{sample_name}_kinetics_fit.txt",
+                                mime="text/plain",
+                            )
+                            st.caption("The file is tab-delimited (TSV). You can open it in Excel or import it into any plotting software.")
+                        except Exception as _e:
+                            st.warning(f"Unable to generate TXT export: {_e}")
                 except Exception as e:
                     st.error(f"Model fitting failed: {e}")
     else:
