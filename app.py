@@ -732,6 +732,34 @@ div[data-baseweb="select"] *{
     unsafe_allow_html=True
 )
 
+
+# --- 🎛️ Button style patch (forms/baseweb) ---
+st.markdown(
+    """
+    <style>
+    /* Ensure form submit buttons and BaseWeb buttons match primary theme */
+    .stFormSubmitButton > button,
+    button[data-testid="baseButton-primary"],
+    button[data-testid="baseButton-secondary"],
+    button[data-testid^="baseButton-"]{
+      border-radius: 12px !important;
+      border: 1px solid var(--cd-border) !important;
+      background: linear-gradient(180deg, var(--cd-accent), var(--cd-accent-2)) !important;
+      color: #ffffff !important;
+      font-weight: 600 !important;
+      padding: 0.55rem 1.0rem !important;
+    }
+    .stFormSubmitButton > button:hover,
+    button[data-testid="baseButton-primary"]:hover,
+    button[data-testid="baseButton-secondary"]:hover,
+    button[data-testid^="baseButton-"]:hover{
+      filter: brightness(1.05);
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
 # --- 🏢 Logo and Title ---
 try:
     logo = Image.open(resolve_resource("assets/Logo.png", "Logo.png") or "Logo.png")
