@@ -892,12 +892,15 @@ if uploaded_file is not None:
     mask_purple = cv2.morphologyEx(mask_purple, cv2.MORPH_CLOSE, close_kernel_purple)
     mask_purple = cv2.morphologyEx(mask_purple, cv2.MORPH_OPEN,  open_kernel_purple)
 
-    # --- 🛠️ Cement mask from non-background pixels ---
-    # Define the specimen as any pixel that is not background-white, then keep only the
-    # largest connected component. This prevents the total body mask from being biased by
-    # color segmentation of gray/purple regions.
-    white_rgb = cv2.inRange(image, (250, 250, 250), (255, 255, 255))
-    mask_non_background = cv2.bitwise_not(white_rgb)
+    # --- 🛠️ Cement mask from near-white background removal (robust) ---
+    # Define the specimen as any pixel that is NOT part of a near-white background.
+    # This is more robust than requiring pure RGB white and keeps the body mask
+    # independent from purple/gray segmentation.
+    hsv_bg = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    lower_white_bg = np.array([0, 0, 180])
+    upper_white_bg = np.array([179, 65, 255])
+    mask_background = cv2.inRange(hsv_bg, lower_white_bg, upper_white_bg)
+    mask_non_background = cv2.bitwise_not(mask_background)
 
     kernel = np.ones((15, 15), np.uint8)
     mask_shape = cv2.morphologyEx(mask_non_background, cv2.MORPH_CLOSE, kernel)
