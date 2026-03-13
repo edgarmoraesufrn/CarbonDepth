@@ -892,13 +892,15 @@ if uploaded_file is not None:
     mask_purple = cv2.morphologyEx(mask_purple, cv2.MORPH_CLOSE, close_kernel_purple)
     mask_purple = cv2.morphologyEx(mask_purple, cv2.MORPH_OPEN,  open_kernel_purple)
 
-    # --- 🛠️ Shape-Based Mask (bright regions) ---
-    gray = cv2.cvtColor(enhanced_bgr, cv2.COLOR_BGR2GRAY)
-    white_rgb = cv2.inRange(image, (250, 250, 255), (255, 255, 255))
-    _, mask_bright = cv2.threshold(gray, 40, 255, cv2.THRESH_BINARY)
-    mask_bright_no_white = cv2.bitwise_and(mask_bright, cv2.bitwise_not(white_rgb))
+    # --- 🛠️ Cement mask from non-background pixels ---
+    # Define the specimen as any pixel that is not background-white, then keep only the
+    # largest connected component. This prevents the total body mask from being biased by
+    # color segmentation of gray/purple regions.
+    white_rgb = cv2.inRange(image, (250, 250, 250), (255, 255, 255))
+    mask_non_background = cv2.bitwise_not(white_rgb)
+
     kernel = np.ones((15, 15), np.uint8)
-    mask_shape = cv2.morphologyEx(mask_bright_no_white, cv2.MORPH_CLOSE, kernel)
+    mask_shape = cv2.morphologyEx(mask_non_background, cv2.MORPH_CLOSE, kernel)
     mask_shape = cv2.morphologyEx(mask_shape, cv2.MORPH_OPEN, kernel)
     contours, _ = cv2.findContours(mask_shape, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     mask_shape_clean = np.zeros_like(mask_shape)
@@ -907,25 +909,13 @@ if uploaded_file is not None:
         if cv2.contourArea(largest_contour) > 500:
             cv2.drawContours(mask_shape_clean, [largest_contour], -1, 255, thickness=cv2.FILLED)
 
-    # --- 🎯 Combine color and shape to form initial mask_cement ---
-    mask_cement_color = cv2.bitwise_or(mask_gray, mask_purple)
-    mask_cement = cv2.bitwise_or(mask_cement_color, cv2.bitwise_and(mask_shape_clean, cv2.bitwise_not(mask_cement_color)))
+    # --- 🎯 Initial cement mask = specimen area (independent of purple/gray segmentation) ---
+    mask_cement = mask_shape_clean.copy()
 
     # ✅ APLICAR kernel_size_gray NO mask_cement (controle do contorno)
     kernel_gray = np.ones((kernel_size_gray, kernel_size_gray), np.uint8)
     mask_cement = cv2.morphologyEx(mask_cement, cv2.MORPH_CLOSE, kernel_gray)  # Fecha buracos
     mask_cement = cv2.morphologyEx(mask_cement, cv2.MORPH_OPEN, kernel_gray)   # Remove ruído
-
-    # ✅ Regularização cirúrgica do contorno do cement mask para reduzir serrilhado
-    contours_cement, _ = cv2.findContours(mask_cement, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    if contours_cement:
-        largest_cement_contour = max(contours_cement, key=cv2.contourArea)
-        if cv2.contourArea(largest_cement_contour) > 500:
-            epsilon = 0.005 * cv2.arcLength(largest_cement_contour, True)
-            smooth_cement_contour = cv2.approxPolyDP(largest_cement_contour, epsilon, True)
-            mask_cement_smooth = np.zeros_like(mask_cement)
-            cv2.drawContours(mask_cement_smooth, [smooth_cement_contour], -1, 255, thickness=cv2.FILLED)
-            mask_cement = mask_cement_smooth
 
     # ✅ Default alkaline mask (stable core)
     mask_purple_default = cv2.bitwise_and(mask_purple, mask_cement)
