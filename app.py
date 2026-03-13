@@ -1240,16 +1240,26 @@ if uploaded_file is not None:
         # --- Depths per sampled line ---
         depths_raw = []
         for y in y_lines:
-            # (2) Use the cement width of THIS line (protects against cavities/chips)
+            # (2) Use a span-regularized cement width for THIS line.
+            #     This avoids border serration/aliasing in mask_cement from artificially reducing
+            #     the measured specimen width and inflating carbonation depth.
             row_cement = (mask_cement[y, :] > 0)
-            L_cement = int(np.sum(row_cement))
-            if L_cement == 0:
+            cement_idx = np.flatnonzero(row_cement)
+            if cement_idx.size == 0:
                 continue
 
-            row_purple = (mask_purple_main[y, :] > 0) & row_cement
+            x_row_left = int(cement_idx[0])
+            x_row_right = int(cement_idx[-1])
+
+            row_cement_span = np.zeros_like(row_cement, dtype=bool)
+            row_cement_span[x_row_left:x_row_right + 1] = True
+            L_cement = int(x_row_right - x_row_left + 1)
+
+            row_purple = (mask_purple_main[y, :] > 0) & row_cement_span
             L_purple = int(np.sum(row_purple))
 
-            # Same depth definition as the original algorithm; only "width" is made line-consistent.
+            # Same depth definition as the original algorithm; only the cement-width estimator
+            # is regularized to suppress mask-edge serration artifacts.
             depth = (L_cement - L_purple) * mm_per_pixel / 2.0
             depths_raw.append(float(depth))
 
