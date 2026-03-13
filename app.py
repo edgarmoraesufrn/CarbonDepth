@@ -916,6 +916,17 @@ if uploaded_file is not None:
     mask_cement = cv2.morphologyEx(mask_cement, cv2.MORPH_CLOSE, kernel_gray)  # Fecha buracos
     mask_cement = cv2.morphologyEx(mask_cement, cv2.MORPH_OPEN, kernel_gray)   # Remove ruído
 
+    # ✅ Regularização cirúrgica do contorno do cement mask para reduzir serrilhado
+    contours_cement, _ = cv2.findContours(mask_cement, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if contours_cement:
+        largest_cement_contour = max(contours_cement, key=cv2.contourArea)
+        if cv2.contourArea(largest_cement_contour) > 500:
+            epsilon = 0.005 * cv2.arcLength(largest_cement_contour, True)
+            smooth_cement_contour = cv2.approxPolyDP(largest_cement_contour, epsilon, True)
+            mask_cement_smooth = np.zeros_like(mask_cement)
+            cv2.drawContours(mask_cement_smooth, [smooth_cement_contour], -1, 255, thickness=cv2.FILLED)
+            mask_cement = mask_cement_smooth
+
     # ✅ Default alkaline mask (stable core)
     mask_purple_default = cv2.bitwise_and(mask_purple, mask_cement)
 
@@ -1240,26 +1251,16 @@ if uploaded_file is not None:
         # --- Depths per sampled line ---
         depths_raw = []
         for y in y_lines:
-            # (2) Use a span-regularized cement width for THIS line.
-            #     This avoids border serration/aliasing in mask_cement from artificially reducing
-            #     the measured specimen width and inflating carbonation depth.
+            # (2) Use the cement width of THIS line (protects against cavities/chips)
             row_cement = (mask_cement[y, :] > 0)
-            cement_idx = np.flatnonzero(row_cement)
-            if cement_idx.size == 0:
+            L_cement = int(np.sum(row_cement))
+            if L_cement == 0:
                 continue
 
-            x_row_left = int(cement_idx[0])
-            x_row_right = int(cement_idx[-1])
-
-            row_cement_span = np.zeros_like(row_cement, dtype=bool)
-            row_cement_span[x_row_left:x_row_right + 1] = True
-            L_cement = int(x_row_right - x_row_left + 1)
-
-            row_purple = (mask_purple_main[y, :] > 0) & row_cement_span
+            row_purple = (mask_purple_main[y, :] > 0) & row_cement
             L_purple = int(np.sum(row_purple))
 
-            # Same depth definition as the original algorithm; only the cement-width estimator
-            # is regularized to suppress mask-edge serration artifacts.
+            # Same depth definition as the original algorithm; only "width" is made line-consistent.
             depth = (L_cement - L_purple) * mm_per_pixel / 2.0
             depths_raw.append(float(depth))
 
