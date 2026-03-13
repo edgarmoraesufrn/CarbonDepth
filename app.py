@@ -1326,7 +1326,25 @@ if uploaded_file is not None:
         return m
 
     _mask_cement_u8 = _to_u8_mask(mask_cement)
-    _mask_alkaline_u8 = _to_u8_mask(mask_purple)
+
+    # --- Presentation-only alkaline mask cleanup (does NOT affect depth calculation) ---
+    def _fill_holes_u8(mask_u8: np.ndarray) -> np.ndarray:
+        """Fill internal holes in a binary mask using flood fill. Presentation only."""
+        m = _to_u8_mask(mask_u8)
+        h, w = m.shape[:2]
+        flood = m.copy()
+        ff_mask = np.zeros((h + 2, w + 2), np.uint8)
+        cv2.floodFill(flood, ff_mask, (0, 0), 255)
+        holes = cv2.bitwise_not(flood)
+        return cv2.bitwise_or(m, holes)
+
+    try:
+        _mask_alkaline_display = _to_u8_mask(mask_purple_main)
+    except NameError:
+        _mask_alkaline_display = _to_u8_mask(mask_purple)
+
+    _mask_alkaline_display = _fill_holes_u8(_mask_alkaline_display)
+    _mask_alkaline_u8 = _mask_alkaline_display.copy()
 
     st.session_state["img_report_data"] = {
         "sample_name_default": uploaded_file.name.split('.')[0],
